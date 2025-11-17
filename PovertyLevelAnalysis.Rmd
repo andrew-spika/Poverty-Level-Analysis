@@ -1,0 +1,1143 @@
+---
+title: "Poverty Level Analysis"
+author: "Levi Liedke, Luke Schroeder, Andrew Spika, Lucas Steltenpohl"
+output:
+  word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+    
+```{r, echo=FALSE, include=FALSE}
+library(tidyverse)
+library(dplyr)
+library(conflicted)
+library(knitr)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+# Declare dplyr::select as the default for select()
+conflict_prefer("select", "dplyr")
+```
+
+## Purpose
+The purpose of this project is to develop a predictive model to classify households into one of four poverty levels based on observable household attributes, such as the material of their walls and ceilings, the presence of basic amenities, and household composition. This classification is critical for improving the effectiveness of social programs that aim to allocate resources to the most impoverished segments of the population. By utilizing data from the heads of households and potentially leveraging information from non-head members, this analysis seeks to balance interpretability with predictive accuracy. The ultimate goal is to ensure that the model not only provides accurate predictions but also offers insights that can guide policymakers in identifying and addressing the needs of those living in poverty. Through thorough data exploration, data engineering, and statistical modeling using R, this report will demonstrate the rationale and methodology behind the classification process.
+
+## Introduction to Data
+The data consists of 142 predictor variables and the 1 target variable. Within the data there are 9,057 entries for each individual Id. The head of household is the primary predictor variable of interest and is one of the main variables explored. The data was coded in binary so our initial step for this project was to transform the related binary variables into factored variables for more efficient model building. Other variables were created to better approximate for housing materials. For instance, the variable "total_assets" summed all of the phones, televisions, tablets and computers in the household. After engineering the data the original 142 binary variables was reduced to only 37. Other variables were removed do to lack of information and insufficient data. The variables that were considered for the model and looked at in further depth in this report are the following: 
+
+```{r, echo = FALSE, message=FALSE, warning=FALSE}
+
+# Create a data frame describing each variable
+variable_description <- data.frame(
+  Variable = c("rooms", "tamhog", "tamviv", "escolari", "dis", 
+               "meaneduc", "area", "age", "total_children", "total_adults",
+               "total_household_members", "total_assets", "housing_quality_index", "elim_basu", 
+               "parent_esco", "tipo_vivi", "floor_type", "marital_status", "roof_material",
+               "bedrooms"),
+  Description = c("Number of all rooms in the house", 
+                  "Size of the household", 
+                  "Number of persons living in the household", 
+                  "Years of schooling", 
+                  "Presence of a disabled person (=1 if disabled)", 
+                  "Average years of education for adults (18+)", 
+                  "Whether the area is Urban or Rural", 
+                  "Age in years", 
+                  "Total number of children in the household", 
+                  "Total number of adults in the household", 
+                  "Total household members",
+                  "Total number of assets owned by the household", 
+                  "Index indicating the quality of housing conditions", 
+                  "Primary rubbish disposal method", 
+                  "Education level of the household head",
+                  "How the house is owned, borrowed, rented, etc.",
+                  "Material the floor is made of",
+                  "Marital status of the household member",
+                  "Material the roof is made of",
+                  "Number of bedrooms in the household"),
+  Notes = c("", "", "", "", "Binary variable: 1 = disabled", "", 
+            "", "Measured in years", 
+            "Derived variable", "Derived variable", "Derived variable", 
+            "Sum of household assets", "Composite index for housing quality", 
+            "Categorical variable indicating rubbish disposal method", 
+            "Derived from 'escolari' for the head of the household", "", "", "", "", "")
+)
+
+# Create a clean table for the report
+kable(variable_description, format = "markdown", 
+      caption = "Description of Variables Used in the Multinomial Model")
+
+```
+
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Combine variables logically
+# Create bins for multiple variables
+# Grouped Variables ---------------------------------------------------
+data <- read.csv("poverty.csv")
+
+# Household facilities
+data <- data %>%
+  mutate(
+    has_basic_facilities = as.integer(v14a + refrig + cielorazo + abastaguadentro > 0),
+    overcrowding = hacdor + hacapo,
+    toilet_type = case_when(
+      sanitario2 == 1 ~ "sewer",
+      sanitario3 == 1 ~ "septic",
+      sanitario5 == 1 ~ "latrine",
+      sanitario6 == 1 ~ "other",
+      TRUE ~ "none"
+    ),
+  )
+
+
+data <- data %>%
+  mutate(
+    cooking_energy = case_when(
+      energcocinar1 == 1 ~ "No main source of energy (no kitchen)",
+      energcocinar2 == 1 ~ "Electricity",
+      energcocinar3 == 1 ~ "Gas",
+      energcocinar4 == 1 ~ "Wood/Charcoal",
+      TRUE ~ NA_character_  # Default if no column is TRUE
+    )
+  ) %>%
+  select(-starts_with("energcocinar"))  # Remove original variables
+
+# Household material quality
+data <- data %>%
+  mutate(
+    wall_material = case_when(
+      paredblolad == 1 ~ 1,  # Block or brick
+      paredzocalo == 1 ~ 2,  # Socket (wood, zinc, or asbestos)
+      paredpreb == 1 ~ 3,    # Prefabricated or cement
+      pareddes == 1 ~ 4,     # Waste material
+      paredmad == 1 ~ 5,     # Wood
+      paredzinc == 1 ~ 6,    # Zinc
+      paredfibras == 1 ~ 7,  # Natural fibers
+      paredother == 1 ~ 8,   # Other
+    
+    ),
+    wall_material = factor(
+      wall_material,
+      levels = 1:8,
+      labels = c(
+        "Block or brick",
+        "Socket (wood, zinc, or asbestos)",
+        "Prefabricated or cement",
+        "Waste material",
+        "Wood",
+        "Zinc",
+        "Natural fibers",
+        "Other"
+      )
+    )
+  ) %>%
+  select(-starts_with("pared"))
+
+
+# Combine age-related columns
+data <- data %>%
+  mutate(
+    total_children = r4h1 + r4m1,
+    total_adults = r4h2 + r4m2,
+    total_household_members = total_children + total_adults
+  )
+data <- data %>%
+  mutate(
+    rez_esc = case_when(
+      is.na(rez_esc) ~ 0,   # Handle NA values
+      rez_esc == 1 ~ 1,
+      rez_esc == 2 ~ 2,
+      rez_esc == 3 ~ 3,
+      rez_esc == 4 ~ 4,
+      rez_esc == 5 ~ 5
+    )
+  )
+  
+# Household assets
+data <- data %>%
+  mutate(
+    total_assets = rowSums(across(c(qmobilephone, computer, television, v18q1)), na.rm = TRUE),
+    asset_category = case_when(
+      total_assets == 0 ~ "No assets",
+      total_assets == 1 ~ "Low assets",
+      total_assets > 1 ~ "High assets"
+    )
+  )
+
+data <- data %>%
+  mutate(
+    education_level = case_when(
+      instlevel1 == 1 ~ 1,  # No level of education
+      instlevel2 == 1 ~ 2,  # Incomplete primary
+      instlevel3 == 1 ~ 3,  # Complete primary
+      instlevel4 == 1 ~ 4,  # Incomplete academic secondary level
+      instlevel5 == 1 ~ 5,  # Complete academic secondary level
+      instlevel6 == 1 ~ 6,  # Incomplete technical secondary level
+      instlevel7 == 1 ~ 7,  # Complete technical secondary level
+      instlevel8 == 1 ~ 8,  # Undergraduate and higher education
+      instlevel9 == 1 ~ 9,  # Postgraduate higher education
+      TRUE ~ NA_real_       # Default if no column is TRUE
+    ),
+    education_level = factor(
+      education_level,
+      levels = 1:9,
+      labels = c(
+        "No level of education",
+        "Incomplete primary",
+        "Complete primary",
+        "Incomplete academic secondary level",
+        "Complete academic secondary level",
+        "Incomplete technical secondary level",
+        "Complete technical secondary level",
+        "Undergraduate and higher education",
+        "Postgraduate higher education"
+      )
+    )
+  ) %>%
+  select(-starts_with("instlevel"))
+
+
+# Housing Quality Index
+data <- data %>%
+  mutate(housing_quality_index = epared1 + epared2 * 2 + epared3 * 3 +
+                                    etecho1 + etecho2 * 2 + etecho3 * 3 +
+                                    eviv1 + eviv2 * 2 + eviv3 * 3)
+
+# Electricity Access
+data <- data %>%
+  mutate(electricity_access = public + planpri + coopele - noelec)
+
+# Water Access
+data <- data %>%
+  mutate(water_access = abastaguadentro + abastaguafuera - abastaguano)
+
+
+# Asset Ownership Index
+data <- data %>%
+  mutate(asset_ownership_index = computer + television + refrig + v18q)
+
+
+# Rubbish disposal
+data <- data %>%
+  mutate(
+    elim_basu = case_when(
+      elimbasu1 == 1 ~ 1, # Tanker truck
+      elimbasu2 == 1 ~ 2, # Botan hollow or buried
+      elimbasu3 == 1 ~ 3, # Burning
+      elimbasu4 == 1 ~ 4, # Throwing in unoccupied space
+      elimbasu5 == 1 ~ 5, # Throwing in river, creek, or sea
+      elimbasu6 == 1 ~ 6, # Other
+      TRUE ~ NA_real_    # Default if no column is TRUE
+    )
+  ) %>%
+  select(-starts_with("elimbasu")) 
+
+# Create a new column based on the binary tipovivi variables
+data <- data %>%
+  mutate(
+    tipo_vivi = case_when(
+      tipovivi1 == 1 ~ 1,  # Own and fully paid house
+      tipovivi2 == 1 ~ 2,  # Own, paying in installments
+      tipovivi3 == 1 ~ 3,  # Rented
+      tipovivi4 == 1 ~ 4,  # Precarious
+      tipovivi5 == 1 ~ 5,  # Other (assigned, borrowed)
+      TRUE ~ NA_real_      # Default if no column is TRUE
+    ),
+    tipo_vivi = factor(
+      tipo_vivi,
+      levels = 1:5,
+      labels = c(
+        "Own and fully paid house",
+        "Own, paying in installments",
+        "Rented",
+        "Precarious",
+        "Other (assigned, borrowed)"
+      )
+    )
+  ) %>%
+  select(-starts_with("tipovivi"))
+
+data <- data %>%
+  mutate(
+    floor_type = case_when(
+      pisomoscer == 1 ~ 1,  # Mosaic, Ceramic, Terrazo
+      pisocemento == 1 ~ 2, # Cement
+      pisomadera == 1 ~ 3,  # Wood
+      pisonatur == 1 ~ 4,   # Natural Material
+      pisoother == 1 ~ 5,   # Other
+      pisonotiene == 1 ~ 6, # No Floor
+      TRUE ~ NA_real_       # Default if no column is TRUE
+    ),
+    floor_type = factor(
+      floor_type,
+      levels = 1:6,
+      labels = c(
+        "Mosaic, Ceramic, Terrazo",
+        "Cement",
+        "Wood",
+        "Natural Material",
+        "Other",
+        "No Floor"
+      )
+    )
+  ) %>%
+  select(-starts_with("piso"))
+
+
+# Create a new column based on the binary lugar variables
+data <- data %>%
+  mutate(
+    region = case_when(
+      lugar1 == 1 ~ 1, # Central
+      lugar2 == 1 ~ 2, # Chorotega
+      lugar3 == 1 ~ 3, # Pacífico Central
+      lugar4 == 1 ~ 4, # Brunca
+      lugar5 == 1 ~ 5, # Huetar Atlántica
+      lugar6 == 1 ~ 6, # Huetar Norte
+      TRUE ~ NA_real_  # Default if no column is TRUE
+    )
+  ) %>%
+  select(-starts_with("lugar")) 
+
+# Marital Status 
+data <- data %>%
+  mutate(
+    marital_status = case_when(
+      estadocivil1 == 1 ~ 1,  # Less than 10 years old
+      estadocivil2 == 1 ~ 2,  # Free or coupled union
+      estadocivil3 == 1 ~ 3,  # Married
+      estadocivil4 == 1 ~ 4,  # Divorced
+      estadocivil5 == 1 ~ 5,  # Separated
+      estadocivil6 == 1 ~ 6,  # Widow/er
+      estadocivil7 == 1 ~ 7,  # Single
+      TRUE ~ NA_real_         # Default if no column is TRUE
+    )
+  ) %>%
+  select(-starts_with("estadocivil")) 
+
+# Parentesco 
+data <- data %>%
+  mutate(
+    parent_esco = case_when(
+      parentesco1 == 1 ~ 1,  # Household head
+      parentesco2 == 1 ~ 2,  # Spouse/partner
+      parentesco3 == 1 ~ 3,  # Son/daughter
+      parentesco4 == 1 ~ 4,  # Stepson/stepdaughter
+      parentesco5 == 1 ~ 5,  # Son/daughter-in-law
+      parentesco6 == 1 ~ 6,  # Grandson/granddaughter
+      parentesco7 == 1 ~ 7,  # Mother/father
+      parentesco8 == 1 ~ 8,  # Father/mother-in-law
+      parentesco9 == 1 ~ 9,  # Brother/sister
+      parentesco10 == 1 ~ 10, # Brother/sister-in-law
+      parentesco11 == 1 ~ 11, # Other family member
+      parentesco12 == 1 ~ 12, # Other non-family member
+      TRUE ~ NA_real_        # Default if no column is TRUE
+    )
+  ) %>%
+  select(-starts_with("parentesco"))
+
+library(dplyr)
+
+data <- data %>%
+  mutate(
+    roof_material = case_when(
+      techozinc == 1 ~ 1,  # Metal foil or zinc
+      techoentrepiso == 1 ~ 2,  # Fiber cement, mezzanine
+      techocane == 1 ~ 3,    # Natural fibers
+      techootro == 1 ~ 4,   # Other
+      TRUE ~ NA_real_        # Default if no column is TRUE
+    ),
+    roof_material = factor(
+      roof_material,
+      levels = 1:4,
+      labels = c(
+        "Metal foil or zinc",
+        "Fiber cement, mezzanine",
+        "Natural fibers",
+        "Other"
+      )
+    )
+  ) %>%
+  select(-starts_with("techo"))
+
+# Create the new variable 'area'
+data <- data %>%
+  mutate(area = case_when(
+    area1 == 1 ~ "urban",
+    area2 == 1 ~ "rural",
+    TRUE ~ NA_character_  # Assign NA if neither condition is met
+  ))
+data$area = as.factor(data$area)
+
+
+# Remove unused columns
+data <- data %>%
+  select(-v14a, -refrig, -cielorazo, -abastaguadentro, -hacdor, -hacapo, -sanitario2, -sanitario3, -sanitario5, -sanitario6, -r4h1, -r4m1, -r4h2, -r4m2, -qmobilephone, -computer, -television, -v18q1, -epared1, -epared2, -epared3, -etecho1, -etecho2, -etecho3, -eviv1, -eviv2, -eviv3, -public, -planpri, -coopele, -noelec, -abastaguafuera, -abastaguano, -sanitario1, -Id, -idhogar, -r4t1, -r4t2, -r4t3, -male, -female, -hhsize, -starts_with("SQB"), -v18q, -r4h3, -r4m3, -agesq, -area1, -area2, -hogar_nin, -hogar_adul, -hogar_mayor, -hogar_total)
+
+#Putting data in new data frame
+poverty_binned <- data %>% 
+  select(-v2a1) # removing variable with many N/A to keep row count high
+
+```
+
+### Data Exploration
+
+It is important to explore the data including their distributions, differences within target variable categories, and correlations. The concern of this analysis is being able to predict poverty level based on data concerning the head of a household as mentioned before. 
+
+```{r Parentesco, echo=FALSE, message=FALSE, warning=FALSE}
+
+# Plotting the distribution of the 'parentesco' variable
+ggplot(poverty_binned, aes(x = factor(parent_esco))) +
+  geom_bar(fill = 'skyblue', color = 'black') +
+  labs(title = 'Distribution of Parentesco Variable', x = 'Parentesco', y = 'Frequency', caption = "Figure 1: Distribution of Parentesco") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+It can be seen in Figure 1 that the majority of individuals for which the data is recorded is either the head of the household, spouse, or a child of the head of household. These are variable types 1, 2, and 3, respectively. 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+conflicts_prefer(dplyr::filter)
+heads_of_household = poverty_binned %>% filter(parent_esco==1)
+
+# Plot for Target 1
+p1 <- ggplot(heads_of_household %>% filter(Target == 1), aes(x = tipo_vivi)) +
+  geom_bar(fill = "lightblue", color = "black") +
+  labs(
+    title = "Extreme Poverty",
+    x = "",
+    y = "Count"
+  ) +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 12),
+    axis.title.y = element_text(size = 10),
+    axis.text.x = element_text(size = 4, angle = 45, hjust = 1),  # Adjust x-axis labels
+    axis.text.y = element_text(size = 4)
+  )
+
+# Plot for Target 2
+p2 <- ggplot(heads_of_household %>% filter(Target == 2), aes(x = tipo_vivi)) +
+  geom_bar(fill = "skyblue", color = "black") +
+  labs(
+    title = "Moderate Poverty",
+    x = "",
+    y = "Count"
+  ) +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 12),
+    axis.title.y = element_text(size = 10),
+    axis.text.x = element_text(size = 4, angle = 45, hjust = 1),  # Adjust x-axis labels
+    axis.text.y = element_text(size = 4)
+  )
+
+# Plot for Target 3
+p3 <- ggplot(heads_of_household %>% filter(Target == 3), aes(x = tipo_vivi)) +
+  geom_bar(fill = "blue", color = "black") +
+  labs(
+    title = "Vulnerable Households",
+    x = "",
+    y = "Count"
+  ) +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 12),
+    axis.title.y = element_text(size = 10),
+    axis.text.x = element_text(size = 4, angle = 45, hjust = 1),  # Adjust x-axis labels
+    axis.text.y = element_text(size = 4)
+  )
+
+# Plot for Target 4
+p4 <- ggplot(heads_of_household %>% filter(Target == 4), aes(x = tipo_vivi)) +
+  geom_bar(fill = "darkblue", color = "black") +
+  labs(
+    title = "Non-Vulnerable Households",
+    x = "",
+    y = "Count"
+  ) +
+  theme_minimal() + 
+  theme(
+    plot.title = element_text(size = 12),
+    axis.title.y = element_text(size = 10),
+    axis.text.x = element_text(size = 4, angle = 45, hjust = 1),  # Adjust x-axis labels
+    axis.text.y = element_text(size = 4)
+  )
+
+# Arrange plots in a grid with the caption
+grid.arrange(
+  arrangeGrob(p1, p2, p3, p4, ncol = 2),  # Arrange the plots in a 2x2 grid
+  caption = textGrob("Figure 2: Distribution by Housing Type", gp = gpar(fontsize = 10), hjust = 0),                               # Add the caption below
+  ncol = 1,                              # 1 column layout (plots + caption)
+  heights = c(10, 1)                     # Adjust relative heights
+)
+
+```
+Looking at the different types of housing for each poverty level in Figure 2, it is observed that the households that are not vulnerable to poverty have a greater proportion of paying for the house in installments in comparison to the other three categories. Also a similar distribution of owned and fully paid for as well as other are seen throughout each poverty level for the heads of households. 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# Load necessary libraries
+library(ggplot2)
+library(gridExtra)
+library(cowplot) # For extracting and arranging legends
+
+heads_of_household$Target = as.factor(heads_of_household$Target)
+
+# Define the variables to be plotted
+variables <- c("escolari", "age", "meaneduc")
+
+# Define custom labels for the Target variable
+target_labels <- c(
+  "1" = "Extreme Poverty",
+  "2" = "Moderate Poverty",
+  "3" = "Vulnerable Households",
+  "4" = "Non-Vulnerable Households"
+)
+
+# Create individual density plots without legends
+plot_list <- lapply(variables, function(var) {
+  ggplot(heads_of_household, aes_string(x = var, color = "Target", fill = "Target")) +
+    geom_density(alpha = 0.3, adjust = 1.2) +
+    labs(title = paste("Density of", var, "by Target"), x = var, y = "Density") +
+    theme_minimal() +
+    scale_fill_brewer(palette = "Set2", name = "Household Category", labels = target_labels) +
+    scale_color_brewer(palette = "Set2", name = "Household Category", labels = target_labels) +
+    theme(legend.position = "none") # Remove legends from individual plots
+})
+
+# Create a dummy plot to extract the legend
+legend_plot <- ggplot(heads_of_household, aes(x = age, color = Target, fill = Target)) +
+  geom_density(alpha = 0.3) +
+  scale_fill_brewer(palette = "Set2", name = "Household Category", labels = target_labels) +
+  scale_color_brewer(palette = "Set2", name = "Household Category", labels = target_labels) +
+  theme_minimal()
+
+# Extract the legend
+legend <- get_legend(legend_plot)
+
+plot_list = c(plot_list, list(legend))
+
+# Arrange the plots and the legend
+grid.arrange(
+  arrangeGrob(grobs = plot_list, ncol=2),
+  caption = textGrob("Figure 3: Distributions by Target", gp = gpar(fontsize = 10), hjust = 0),
+  ncol = 1, # Adjust heights to give space for the legend
+  heights = c(10,1)
+)
+
+```
+
+Figure 3 shows the distributions of each of the variables years of schooling (escolari), age, and average years of education for adults (meaneduc) for each of the poverty levels. The density graphs show that overall the distributions seem relatively similar for each of these three variables and poverty level. The meaneduc variable shows non-vulnerable households have more of a distribution center around 10 whereas the other levels are closer to five or six. The non-vulnerable household distributions for each of the variables seem slightly more evenly spread in the distributions than the other levels as well. 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# Load necessary libraries
+library(ggplot2)
+library(gridExtra)
+
+heads_of_household$Target <- as.factor(heads_of_household$Target)
+
+# Define the variables to be plotted
+variables <- c("total_children", "total_adults", "total_household_members")
+
+# Define custom labels for the Target variable
+target_labels <- c(
+  "1" = "Extreme",
+  "2" = "Moderate",
+  "3" = "Vulnerable",
+  "4" = "Non-Vulnerable"
+)
+
+# Create individual violin plots for each variable with custom x-axis labels
+plot_list <- lapply(variables, function(var) {
+  ggplot(heads_of_household, aes_string(x = "Target", y = var, fill = "Target")) +
+    geom_violin(trim = FALSE, alpha = 0.7) +
+    scale_fill_brewer(palette = "Set2") +
+    scale_x_discrete(labels = target_labels) +  # Add custom x-axis labels
+    labs(title = paste(var, "by Target"), x = "Household Category", y = var) +
+    theme_minimal() +
+    theme(legend.position = "none",
+          axis.text.x = element_text(size = 6, hjust = 1, angle = 45))  # Remove the legend
+})
+
+# Create a dummy plot to extract the legend
+legend_plot <- ggplot(heads_of_household, aes(x = age, color = Target, fill = Target)) +
+  geom_density(alpha = 0.3) +
+  scale_fill_brewer(palette = "Set2", name = "Household Category", labels = target_labels) +
+  scale_color_brewer(palette = "Set2", name = "Household Category", labels = target_labels) +
+  theme_minimal()
+
+# Extract the legend
+legend <- get_legend(legend_plot)
+
+plot_list = c(plot_list, list(legend))
+
+# Arrange the plots in a grid layout (2 columns)
+grid.arrange(
+  grobs = plot_list,
+  bottom = textGrob("Figure 4: Violin Plots of Number of Individuals", gp = gpar(fontsize = 10), hjust = 0),
+  ncol = 2
+)
+
+```
+
+Figure 4 shows violin plots of the number of members in the household for the heads of household and separated by the poverty level. The overall number of members may be centered slightly smaller in extreme poverty households compared to moderate poverty, vulnerable households, and non-vulnerable households. Overall, it appears the number of members in moderate poverty households and vulnerable households are pretty evenly distributed. 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# Load libraries
+library(vcd)
+library(ggplot2)
+library(corrplot)
+
+# Convert the variables to factors
+heads_of_household$wall_material <- as.factor(heads_of_household$wall_material)
+heads_of_household$education_level <- as.factor(heads_of_household$education_level)
+heads_of_household$tipo_vivi <- as.factor(heads_of_household$tipo_vivi)
+heads_of_household$floor_type <- as.factor(heads_of_household$floor_type)
+heads_of_household$marital_status <- as.factor(heads_of_household$marital_status)
+heads_of_household$roof_material <- as.factor(heads_of_household$roof_material)
+heads_of_household$area <- as.factor(heads_of_household$area)
+heads_of_household$Target <- as.factor(heads_of_household$Target)
+
+# Select the relevant variables, including 'Target'
+selected_vars <- heads_of_household[, c("wall_material", "education_level", "tipo_vivi", 
+                                        "floor_type", "marital_status", "roof_material", "area", "Target")]
+
+# Create a function to calculate the Cramér's V matrix
+cramers_v_matrix <- function(df) {
+  n <- ncol(df)
+  cramers_v <- matrix(1, n, n)
+  colnames(cramers_v) <- rownames(cramers_v) <- colnames(df)
+  
+  # Calculate Cramér's V for each pair of variables
+  for (i in 1:(n-1)) {
+    for (j in (i+1):n) {
+      # Cross-tabulation between two variables
+      tbl <- table(df[[i]], df[[j]])
+      # Calculate Cramér's V statistic
+      cramers_v[i, j] <- assocstats(tbl)$cramer
+      cramers_v[j, i] <- cramers_v[i, j]
+    }
+  }
+  
+  return(cramers_v)
+}
+
+# Compute the Cramér's V matrix including 'Target'
+cv_matrix <- cramers_v_matrix(selected_vars)
+
+# View the Cramér's V matrix
+#cv_matrix
+
+par(mar = c(4, 2, 2, 4) + 1)
+# Plot the Cramér's V matrix using corrplot
+corrplot(cv_matrix, method = "color", type = "upper", 
+         tl.col = "black", tl.srt = 45); mtext("Figure 5: Cramér's V Matrix", side = 1, line = 4, cex = 0.8)
+
+
+```
+
+ Figure 5 shows the correlations between categorical predictor variables with the Target variable included. Many of the categorical variables have multiple levels and therefore don't lend to having correlations as readily. These variables experience little to no correlations with the largest one being between floor type and wall material. These variables should be confidently tested in a predictive model. 
+ 
+```{r, echo=FALSE, warning=FALSE, messag=FALSE}
+# Select the relevant numeric variables
+selected_vars <- heads_of_household[, c("age", "meaneduc", "bedrooms", "escolari", "total_assets")]
+
+# Convert selected_vars from integer to numeric
+selected_vars <- as.data.frame(lapply(selected_vars, as.numeric))
+
+# Compute Pearson correlation matrix
+cor_matrix <- cor(selected_vars, method = "pearson", use = "complete.obs")
+
+# View the correlation matrix
+#cor_matrix
+
+# Plot the correlation matrix using corrplot
+corrplot(cor_matrix, method = "color", type = "upper", 
+         tl.col = "black", tl.srt = 45); mtext("Figure 6: Numerical Correlations", side = 1, line = 4, cex = 0.8)
+
+```
+Among some of the numerical predictors, the variables show moderate correlations with the largest being between the meaneduc and escolari variables as shown in Figure 6. This correlation is 0.8046. This is quite strong and may be reason to eliminate one of these variables from the model due to it providing redundant information. 
+
+The data exploration provided valuable insights into the factors that influence household poverty. For example, certain variables such as meaneduc (average education level of household members) and tipo_vivi (type of housing), showed strong and consistent patterns with poverty levels as significant predictors. For instance, higher average education levels were generally associated with lower poverty, suggesting that there is a negative relationship between education and poverty status. Similarly, the type of housing revealed important distinctions, as certain housing conditions lined up with certain poverty classifications.
+
+On the other hand, some variables exhibited redundancy or a limited association with poverty outcomes. These variables didn't add much explanatory power and displayed weak or inconsistent trends, indicating they may not be critical for modeling or predicting household poverty. 
+
+Overall, this exploration not only helped identify key variables that correlate strongly with poverty levels but also highlighted the importance of careful feature selection to improve the robustness and accuracy of subsequent modeling efforts.
+
+### The Statistical Model
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Filter to include only heads of household
+heads_of_household = poverty_binned %>% filter(parent_esco==1)
+
+# Split the data into training testing
+set.seed(90210)
+heads_of_household <- na.omit(heads_of_household)
+train_index = sample(1:nrow(heads_of_household), size=0.8*nrow(heads_of_household), replace=FALSE)
+train = heads_of_household[train_index,]
+test = heads_of_household[-train_index,]
+```
+
+```{r, echo=FALSE, include=FALSE}
+# Load necessary library
+library(nnet)
+
+# Fit a multinomial logistic regression model
+full <- multinom(Target ~ ., data = train)
+
+back.elim <- step(full,  direction="backward", trace=0)
+#summary(back.elim)
+```
+The backward elimination procedure was employed to identify the optimal predictive model while balancing predictive accuracy and interpretability. This method began with a full model that included all variables from the filtered dataset. Non-significant predictors were systematically removed until a final set of 14 variables remained. These variables, which significantly contributed to classifying the four categories of poverty, included the number of rooms, household size, the composition of the household by age groups, individual years of education, presence of a disability, region, age, assets, housing material quality, garbage disposal, and the role of the head of the household.
+
+Although lasso regression was also considered for variable selection, it was ultimately not used because it retained more predictors than desired for the objectives of this project. Backward elimination was favored as it provided a more concise and interpretative model while maintaining strong predictive power.
+
+
+```{r, echo=FALSE, include=FALSE}
+backward_mod <- multinom(formula = Target ~ rooms + tamviv + escolari + 
+    dis  + meaneduc + area + age + total_children + total_adults + 
+    total_assets + housing_quality_index + elim_basu + marital_status, 
+    data = train)
+
+# Calculate the accuracy of the model
+
+pred_test_lasso = test %>% dplyr::select(rooms, tamviv, escolari, dis, meaneduc, area, age, total_children, total_adults, total_assets, housing_quality_index, elim_basu, marital_status)
+# Making predictions on the test set
+pred_lasso = predict(backward_mod, pred_test_lasso, type = "class")
+
+# Create a confusion matrix (if required)
+cont_tab_lasso = table(pred_lasso, test$Target)
+print(cont_tab_lasso)
+
+# Calculate accuracy
+lasso_mod_acc = mean(pred_lasso == test$Target)
+print(paste("Accuracy:", round(lasso_mod_acc * 100, 2), "%"))
+
+```
+
+
+```{r, echo=FALSE}
+
+# Create the confusion matrix as a table
+confusion_matrix <- matrix(c(
+  9, 6, 2, 4,  # Row 1 (Predicted Class 1)
+  11, 13, 11, 12, # Row 2 (Predicted Class 2)
+  0, 2, 0, 0,  # Row 3 (Predicted Class 3)
+  20, 62, 56, 352 # Row 4 (Predicted Class 4)
+), nrow = 4, byrow = TRUE)
+
+# Assign row and column names
+rownames(confusion_matrix) <- c("Predicted 1", "Predicted 2", "Predicted 3", "Predicted 4")
+colnames(confusion_matrix) <- c("Actual 1", "Actual 2", "Actual 3", "Actual 4")
+
+# Define the accuracy
+accuracy <- 66.79
+
+# Print the confusion matrix as a formatted table
+kable(confusion_matrix, format = "markdown", 
+      caption = paste("Confusion Matrix: Model Predictions vs Actual (Overall Accuracy:", accuracy, "%)"))
+
+```
+
+The multinomial logistic regression model achieved an accuracy of 66.79%, indicating moderate predictive performance. The confusion matrix shows that the model performs best for category 4, which accounts for the majority of correct predictions with 352 true positives. However, the model struggles with the other categories, particularly category 3, which has no correct predictions and 2 misclassifications. Categories 1 and 2 show slightly better performance, with a small number of correct predictions (9 and 13, respectively) but still significant misclassifications. This pattern suggests the model may be biased towards category 4, potentially due to class imbalance or insufficient predictive features for the other categories. To improve performance, especially for the underrepresented categories, techniques such as balancing the dataset, refining feature selection, or using alternative modeling approaches like boosting could be explored. Additionally, assessing metrics such as precision and recall for each category would provide deeper insights into the model’s effectiveness.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+# Generate a confusion matrix
+confusion_matrix <- table(pred_lasso, test$Target)
+
+# Initialize lists to store sensitivity and specificity
+sensitivity <- numeric()
+specificity <- numeric()
+
+# Loop through each class and calculate metrics
+classes <- colnames(confusion_matrix)
+for (i in seq_along(classes)) {
+  positive_class <- classes[i]
+  
+  # True Positives, False Negatives, False Positives, True Negatives
+  TP <- confusion_matrix[positive_class, positive_class]
+  FN <- sum(confusion_matrix[, positive_class]) - TP
+  FP <- sum(confusion_matrix[positive_class, ]) - TP
+  TN <- sum(confusion_matrix) - TP - FN - FP
+  
+  # Calculate Sensitivity and Specificity
+  sensitivity[i] <- TP / (TP + FN)
+  specificity[i] <- TN / (TN + FP)
+}
+
+# Combine results into a data frame
+results <- data.frame(
+  Class = classes,
+  Sensitivity = round(sensitivity, 3),
+  Specificity = round(specificity, 3)
+)
+
+# Load necessary libraries
+library(knitr)
+
+# Create the confusion matrix as a table
+confusion_matrix <- matrix(c(
+  9, 6, 2, 4,  # Row 1 (Predicted Class 1)
+  11, 13, 11, 12, # Row 2 (Predicted Class 2)
+  0, 2, 0, 0,  # Row 3 (Predicted Class 3)
+  20, 62, 56, 352 # Row 4 (Predicted Class 4)
+), nrow = 4, byrow = TRUE)
+
+# Assign row and column names
+rownames(confusion_matrix) <- c("Predicted 1", "Predicted 2", "Predicted 3", "Predicted 4")
+colnames(confusion_matrix) <- c("Actual 1", "Actual 2", "Actual 3", "Actual 4")
+
+# Print the confusion matrix as a formatted table
+#kable(confusion_matrix, format = "markdown", 
+      #caption = paste("Confusion Matrix: Model Predictions vs Actual (Overall Accuracy:", accuracy, "%)"))
+
+
+```
+
+
+The multinomial logistic regression model demonstrates varying levels of sensitivity and specificity across the four classes. For category 4, the model achieves high sensitivity (0.957), indicating that it correctly identifies most instances of this class. However, its specificity is notably low (0.281), suggesting frequent misclassification of other categories as category 4. In contrast, category 3 has the lowest sensitivity (0), reflecting significant difficulty in identifying instances of this class, though it achieves high specificity (0.996), indicating that it rarely misclassifies other categories as category 3. Categories 1 and 2 show moderate performance, with sensitivities of 0.225 and 0.157, respectively, indicating limited success in correctly identifying instances of these classes. Both categories achieve relatively high specificities (0.977 and 0.929, respectively), suggesting they are less likely to misclassify other categories as their own. Overall, the results highlight a bias towards category 4 and significant challenges in identifying instances of the other categories.
+
+
+### Conlusion 
+
+This project successfully developed a multinomial logistic regression model to classify households into one of four poverty levels based on observable household attributes. Through thorough data exploration and feature engineering, key predictors such as education levels, household composition, housing material quality, and asset ownership were identified as significant factors influencing poverty classification. The backward elimination method streamlined the model to 13 critical predictors, balancing interpretability and predictive power.
+
+The final model achieved an overall accuracy of 66.79%, performing well in identifying non-vulnerable households (category 4) but struggling with the underrepresented categories, particularly category 3. This imbalance highlights the need for further improvements, such as addressing class imbalance, refining predictor variables, or exploring alternative modeling approaches like boosting techniques. While the model demonstrates promise, its performance variability across categories underscores the complexity of poverty classification and the importance of robust feature selection.
+
+Ultimately, this analysis provides valuable insights for policymakers by identifying key household attributes associated with poverty. These findings can inform targeted interventions and resource allocation strategies to better address the needs of impoverished households. Future work should focus on enhancing model sensitivity for underrepresented categories to improve its utility as a decision-support tool for poverty alleviation programs.
+
+```{r Final Blinded Predictions, include=FALSE}
+blinded = read.csv("poverty-test-blinded.csv")
+Ids = blinded$Id
+
+# Combine variables logically
+# Create bins for multiple variables
+# Grouped Variables ---------------------------------------------------
+data = blinded
+
+# Household facilities
+data <- data %>%
+  mutate(
+    has_basic_facilities = as.integer(v14a + refrig + cielorazo + abastaguadentro > 0),
+    overcrowding = hacdor + hacapo,
+    toilet_type = case_when(
+      sanitario2 == 1 ~ "sewer",
+      sanitario3 == 1 ~ "septic",
+      sanitario5 == 1 ~ "latrine",
+      sanitario6 == 1 ~ "other",
+      TRUE ~ "none"
+    ),
+  )
+
+
+data <- data %>%
+  mutate(
+    cooking_energy = case_when(
+      energcocinar1 == 1 ~ "No main source of energy (no kitchen)",
+      energcocinar2 == 1 ~ "Electricity",
+      energcocinar3 == 1 ~ "Gas",
+      energcocinar4 == 1 ~ "Wood/Charcoal",
+      TRUE ~ NA_character_  # Default if no column is TRUE
+    )
+  ) %>%
+  select(-starts_with("energcocinar"))  # Remove original variables
+
+# Household material quality
+data <- data %>%
+  mutate(
+    wall_material = case_when(
+      paredblolad == 1 ~ 1,  # Block or brick
+      paredzocalo == 1 ~ 2,  # Socket (wood, zinc, or asbestos)
+      paredpreb == 1 ~ 3,    # Prefabricated or cement
+      pareddes == 1 ~ 4,     # Waste material
+      paredmad == 1 ~ 5,     # Wood
+      paredzinc == 1 ~ 6,    # Zinc
+      paredfibras == 1 ~ 7,  # Natural fibers
+      paredother == 1 ~ 8,   # Other
+    
+    ),
+    wall_material = factor(
+      wall_material,
+      levels = 1:8,
+      labels = c(
+        "Block or brick",
+        "Socket (wood, zinc, or asbestos)",
+        "Prefabricated or cement",
+        "Waste material",
+        "Wood",
+        "Zinc",
+        "Natural fibers",
+        "Other"
+      )
+    )
+  ) %>%
+  select(-starts_with("pared"))
+
+
+# Combine age-related columns
+data <- data %>%
+  mutate(
+    total_children = r4h1 + r4m1,
+    total_adults = r4h2 + r4m2,
+    total_household_members = total_children + total_adults
+  )
+data <- data %>%
+  mutate(
+    rez_esc = case_when(
+      is.na(rez_esc) ~ 0,   # Handle NA values
+      rez_esc == 1 ~ 1,
+      rez_esc == 2 ~ 2,
+      rez_esc == 3 ~ 3,
+      rez_esc == 4 ~ 4,
+      rez_esc == 5 ~ 5
+    )
+  )
+  
+# Household assets
+data <- data %>%
+  mutate(
+    total_assets = rowSums(across(c(qmobilephone, computer, television, v18q1)), na.rm = TRUE),
+    asset_category = case_when(
+      total_assets == 0 ~ "No assets",
+      total_assets == 1 ~ "Low assets",
+      total_assets > 1 ~ "High assets"
+    )
+  )
+
+data <- data %>%
+  mutate(
+    education_level = case_when(
+      instlevel1 == 1 ~ 1,  # No level of education
+      instlevel2 == 1 ~ 2,  # Incomplete primary
+      instlevel3 == 1 ~ 3,  # Complete primary
+      instlevel4 == 1 ~ 4,  # Incomplete academic secondary level
+      instlevel5 == 1 ~ 5,  # Complete academic secondary level
+      instlevel6 == 1 ~ 6,  # Incomplete technical secondary level
+      instlevel7 == 1 ~ 7,  # Complete technical secondary level
+      instlevel8 == 1 ~ 8,  # Undergraduate and higher education
+      instlevel9 == 1 ~ 9,  # Postgraduate higher education
+      TRUE ~ NA_real_       # Default if no column is TRUE
+    ),
+    education_level = factor(
+      education_level,
+      levels = 1:9,
+      labels = c(
+        "No level of education",
+        "Incomplete primary",
+        "Complete primary",
+        "Incomplete academic secondary level",
+        "Complete academic secondary level",
+        "Incomplete technical secondary level",
+        "Complete technical secondary level",
+        "Undergraduate and higher education",
+        "Postgraduate higher education"
+      )
+    )
+  ) %>%
+  select(-starts_with("instlevel"))
+
+
+# Housing Quality Index
+data <- data %>%
+  mutate(housing_quality_index = epared1 + epared2 * 2 + epared3 * 3 +
+                                    etecho1 + etecho2 * 2 + etecho3 * 3 +
+                                    eviv1 + eviv2 * 2 + eviv3 * 3)
+
+# Electricity Access
+data <- data %>%
+  mutate(electricity_access = public + planpri + coopele - noelec)
+
+# Water Access
+data <- data %>%
+  mutate(water_access = abastaguadentro + abastaguafuera - abastaguano)
+
+
+# Asset Ownership Index
+data <- data %>%
+  mutate(asset_ownership_index = computer + television + refrig + v18q)
+
+
+# Rubbish disposal
+data <- data %>%
+  mutate(
+    elim_basu = case_when(
+      elimbasu1 == 1 ~ 1, # Tanker truck
+      elimbasu2 == 1 ~ 2, # Botan hollow or buried
+      elimbasu3 == 1 ~ 3, # Burning
+      elimbasu4 == 1 ~ 4, # Throwing in unoccupied space
+      elimbasu5 == 1 ~ 5, # Throwing in river, creek, or sea
+      elimbasu6 == 1 ~ 6, # Other
+      TRUE ~ NA_real_    # Default if no column is TRUE
+    )
+  ) %>%
+  select(-starts_with("elimbasu")) 
+
+# Create a new column based on the binary tipovivi variables
+data <- data %>%
+  mutate(
+    tipo_vivi = case_when(
+      tipovivi1 == 1 ~ 1,  # Own and fully paid house
+      tipovivi2 == 1 ~ 2,  # Own, paying in installments
+      tipovivi3 == 1 ~ 3,  # Rented
+      tipovivi4 == 1 ~ 4,  # Precarious
+      tipovivi5 == 1 ~ 5,  # Other (assigned, borrowed)
+      TRUE ~ NA_real_      # Default if no column is TRUE
+    ),
+    tipo_vivi = factor(
+      tipo_vivi,
+      levels = 1:5,
+      labels = c(
+        "Own and fully paid house",
+        "Own, paying in installments",
+        "Rented",
+        "Precarious",
+        "Other (assigned, borrowed)"
+      )
+    )
+  ) %>%
+  select(-starts_with("tipovivi"))
+
+data <- data %>%
+  mutate(
+    floor_type = case_when(
+      pisomoscer == 1 ~ 1,  # Mosaic, Ceramic, Terrazo
+      pisocemento == 1 ~ 2, # Cement
+      pisomadera == 1 ~ 3,  # Wood
+      pisonatur == 1 ~ 4,   # Natural Material
+      pisoother == 1 ~ 5,   # Other
+      pisonotiene == 1 ~ 6, # No Floor
+      TRUE ~ NA_real_       # Default if no column is TRUE
+    ),
+    floor_type = factor(
+      floor_type,
+      levels = 1:6,
+      labels = c(
+        "Mosaic, Ceramic, Terrazo",
+        "Cement",
+        "Wood",
+        "Natural Material",
+        "Other",
+        "No Floor"
+      )
+    )
+  ) %>%
+  select(-starts_with("piso"))
+
+
+# Create a new column based on the binary lugar variables
+data <- data %>%
+  mutate(
+    region = case_when(
+      lugar1 == 1 ~ 1, # Central
+      lugar2 == 1 ~ 2, # Chorotega
+      lugar3 == 1 ~ 3, # Pacífico Central
+      lugar4 == 1 ~ 4, # Brunca
+      lugar5 == 1 ~ 5, # Huetar Atlántica
+      lugar6 == 1 ~ 6, # Huetar Norte
+      TRUE ~ NA_real_  # Default if no column is TRUE
+    )
+  ) %>%
+  select(-starts_with("lugar")) 
+
+# Marital Status 
+data <- data %>%
+  mutate(
+    marital_status = case_when(
+      estadocivil1 == 1 ~ 1,  # Less than 10 years old
+      estadocivil2 == 1 ~ 2,  # Free or coupled union
+      estadocivil3 == 1 ~ 3,  # Married
+      estadocivil4 == 1 ~ 4,  # Divorced
+      estadocivil5 == 1 ~ 5,  # Separated
+      estadocivil6 == 1 ~ 6,  # Widow/er
+      estadocivil7 == 1 ~ 7,  # Single
+      TRUE ~ NA_real_         # Default if no column is TRUE
+    )
+  ) %>%
+  select(-starts_with("estadocivil")) 
+
+# Parentesco 
+data <- data %>%
+  mutate(
+    parent_esco = case_when(
+      parentesco1 == 1 ~ 1,  # Household head
+      parentesco2 == 1 ~ 2,  # Spouse/partner
+      parentesco3 == 1 ~ 3,  # Son/daughter
+      parentesco4 == 1 ~ 4,  # Stepson/stepdaughter
+      parentesco5 == 1 ~ 5,  # Son/daughter-in-law
+      parentesco6 == 1 ~ 6,  # Grandson/granddaughter
+      parentesco7 == 1 ~ 7,  # Mother/father
+      parentesco8 == 1 ~ 8,  # Father/mother-in-law
+      parentesco9 == 1 ~ 9,  # Brother/sister
+      parentesco10 == 1 ~ 10, # Brother/sister-in-law
+      parentesco11 == 1 ~ 11, # Other family member
+      parentesco12 == 1 ~ 12, # Other non-family member
+      TRUE ~ NA_real_        # Default if no column is TRUE
+    )
+  ) %>%
+  select(-starts_with("parentesco"))
+
+library(dplyr)
+
+data <- data %>%
+  mutate(
+    roof_material = case_when(
+      techozinc == 1 ~ 1,  # Metal foil or zinc
+      techoentrepiso == 1 ~ 2,  # Fiber cement, mezzanine
+      techocane == 1 ~ 3,    # Natural fibers
+      techootro == 1 ~ 4,   # Other
+      TRUE ~ NA_real_        # Default if no column is TRUE
+    ),
+    roof_material = factor(
+      roof_material,
+      levels = 1:4,
+      labels = c(
+        "Metal foil or zinc",
+        "Fiber cement, mezzanine",
+        "Natural fibers",
+        "Other"
+      )
+    )
+  ) %>%
+  select(-starts_with("techo"))
+
+# Create the new variable 'area'
+data <- data %>%
+  mutate(area = case_when(
+    area1 == 1 ~ "urban",
+    area2 == 1 ~ "rural",
+    TRUE ~ NA_character_  # Assign NA if neither condition is met
+  ))
+data$area = as.factor(data$area)
+
+
+# Remove unused columns
+data <- data %>%
+  select(-v14a, -refrig, -cielorazo, -abastaguadentro, -hacdor, -hacapo, -sanitario2, -sanitario3, -sanitario5, -sanitario6, -r4h1, -r4m1, -r4h2, -r4m2, -qmobilephone, -computer, -television, -v18q1, -epared1, -epared2, -epared3, -etecho1, -etecho2, -etecho3, -eviv1, -eviv2, -eviv3, -public, -planpri, -coopele, -noelec, -abastaguafuera, -abastaguano, -sanitario1, Id, -idhogar, -r4t1, -r4t2, -r4t3, -male, -female, -hhsize, -starts_with("SQB"), -v18q, -r4h3, -r4m3, -agesq, -area1, -area2, -hogar_nin, -hogar_adul, -hogar_mayor, -hogar_total)
+
+#Putting data in new data frame
+blinded <- data %>% 
+  select(-v2a1) # removing variable with many N/A to keep row count high
+
+
+
+```
+
+```{r Final Predictions 2, include=FALSE}
+hoh = blinded %>% filter(parent_esco == 1)
+Ids = hoh$Id
+
+prediction_set = hoh %>% dplyr::select(rooms, tamviv, escolari, dis, meaneduc, area, age, total_children, total_adults, total_assets, housing_quality_index, elim_basu, marital_status)
+
+# Making predictions on the test set
+preds = predict(backward_mod, prediction_set, type = "class")
+
+hoh$predictions = preds
+
+final_predictions = data.frame(Id = Ids, predictions = hoh$predictions)
+
+write.csv(final_predictions, file = "final_predictions.csv", row.names = FALSE)
+
+```
+
